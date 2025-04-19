@@ -1,166 +1,186 @@
 # visualize_genome.py
-
-import sys
-import os
-import math 
+import sys, os, math
+from collections import defaultdict
 from graphviz import Digraph
-from utils import load_genome 
-from genome import Genome, NodeGene, ConnectionGene
+from utils import load_genome
+from genome import Genome
 
-def is_input_key(key):
-    return key < 0
-
-class GenomeConfig: pass
+class GenomeConfig:      pass
 class ReproductionConfig: pass
-class StagnationConfig: pass
-class SpeciesSetConfig: pass
-class MainConfig: pass 
+class StagnationConfig:   pass
+class SpeciesSetConfig:   pass
+class MainConfig:         pass
 
-def is_input_key(key):
-    return isinstance(key, int) and key < 0
+def ensure_dir(path):
+    if path and not os.path.exists(path):
+        os.makedirs(path, exist_ok=True)
 
-def visualize_genome(filename, output_filename="genome_graph", show_disabled=False, node_names=None, node_colors=None):
-    """
-    Loads a genome and generates a visualization using Graphviz,
-    ignoring input nodes and connections originating from them.
-    """
-    print(f"Loading Genome: {filename}")
+def is_input_key(k):        
+    return isinstance(k, int) and k < 0
+
+
+def visualize_genome(
+        filename,
+        output_basename="genome_graph",
+        *,
+        show_disabled=False,
+        portrait=True,          # NEW  ← True = top→bottom (rankdir="TB")
+        squeeze=True,            # NEW  ← tighter spacing / smaller fonts
+        node_names=None,
+        node_colors=None,
+):
+    print(f"[viz] loading genome from: {filename}")
     genome = load_genome(filename)
+    if not isinstance(genome, Genome):
+        print("! error – not a Genome instance");   return
 
-    if not genome: return
-    if not isinstance(genome, Genome): print(f"Error: Not a Genome instance (type: {type(genome)})"); return
+    if getattr(genome, "config", None):
+        in_keys  = getattr(genome.config,  "input_keys",  None)
+        out_keys = getattr(genome.config, "output_keys", None)
+    else:
+        in_keys = out_keys = None
 
-    input_keys = None
-    output_keys = None
-    if hasattr(genome, 'config') and genome.config:
-        input_keys = getattr(genome.config, 'input_keys', None)
-        output_keys = getattr(genome.config, 'output_keys', None)
-    if input_keys is None or output_keys is None:
-        print("Warning: Cannot get keys from genome.config, trying config.py")
+    if in_keys is None or out_keys is None:
+        print("! cannot infer keys from genome.config – falling back to config.py")
         try:
-            import config as cfg_local
-            input_keys = [-i - 1 for i in range(cfg_local.NUM_INPUTS)]
-            output_keys = [i for i in range(cfg_local.NUM_OUTPUTS)]
+            import config as cfg
+            in_keys  = [-i - 1 for i in range(cfg.NUM_INPUTS)]
+            out_keys = list(range(cfg.NUM_OUTPUTS))
         except (ImportError, AttributeError):
-            print("Fatal Error: Cannot determine input/output keys.")
-            return
+            print("!! fatal – could not determine input/output keys");  return
 
-    input_keys_set = set(input_keys)
-    output_keys_set = set(output_keys)
+    in_set, out_set = set(in_keys), set(out_keys)
 
-    print("\nCreating graph (Hidden & Output Only) ")
-    if node_names is None: node_names = {}
-    if node_colors is None: node_colors = {}
+    if node_names is None:   node_names  = {}
+    if node_colors is None:  node_colors = {}
 
-    node_attrs = {'shape': 'circle', 'fontsize': '9', 'height': '0.2', 'width': '0.2', 'style': 'filled'}
-    dot = Digraph(comment=f'Genome {genome.genome_id} Fitness {getattr(genome, "fitness", "N/A"):.4f}',
-                  node_attr=node_attrs, graph_attr={'rankdir': 'LR', 'splines': 'spline'})
+    graph_kwargs = dict(rankdir=("TB" if portrait else "LR"), splines="spline")
 
-    # 1. Add ONLY Hidden and Output nodes from genome.nodes
+    if squeeze:
+        graph_kwargs.update(
+            ranksep="0.25", 
+            nodesep="0.15",   
+            ratio="compress", 
+        )
+
+    dot = Digraph(
+        comment=f"Genome {genome.genome_id}  fitness={getattr(genome,'fitness','N/A')}",
+        graph_attr=graph_kwargs,
+        node_attr={
+            "shape": "circle",
+            "fontsize": ("7" if squeeze else "9"),
+            "height": ("0.18" if squeeze else "0.25"),
+            "width":  ("0.18" if squeeze else "0.25"),
+            "style":  "filled",
+        },
+    )
+
     drawn_nodes = set()
-    hidden_node_ids = []
-    output_node_ids = []
 
-    for node_key, ng in genome.nodes.items():
-        if node_key in input_keys_set: continue # *** SKIP INPUT KEYS ***
+    AGG_NODE_ID = "AGG_INPUT"
+    dot.node(AGG_NODE_ID,
+             label=f"Inputs\n({len(in_set)})",
+             shape="box",
+             fillcolor="lightblue")
+    drawn_nodes.add(AGG_NODE_ID)
 
-        node_graph_id = str(node_key)
-        drawn_nodes.add(node_graph_id)
-        name = node_names.get(node_key, node_graph_id)
+    hidden_ct, output_ct = 0, 0
+    for key, ng in genome.nodes.items():
+        if key in in_set:           
+            continue
+        graph_id = str(key)
+        drawn_nodes.add(graph_id)
+
         attrs = {}
-        color = node_colors.get(node_key)
-
-        if color is None:
-            if node_key in output_keys_set:
-                color = 'lightgreen'
-                attrs['shape'] = 'doublecircle'
-                output_node_ids.append(node_graph_id)
-            elif ng.type == 'HIDDEN':
-                color = 'lightgrey'
-                attrs['shape'] = 'circle'
-                hidden_node_ids.append(node_graph_id)
+        col = node_colors.get(key)
+        if col is None:
+            if key in out_set:
+                col, attrs["shape"] = "lightgreen", "doublecircle"
+                output_ct += 1
             else:
-                print(f"Skipping node {node_key} with type {ng.type}")
-                drawn_nodes.remove(node_graph_id)
-                continue
+                col = "lightgrey"
+                hidden_ct += 1
+        attrs["fillcolor"] = col
 
-        attrs['fillcolor'] = color
-        label = f"Node {name}\n{ng.activation}\n{ng.aggregation}"
-        dot.node(node_graph_id, label=label, **attrs)
+        lbl = f"{node_names.get(key, key)}"
+        dot.node(graph_id, label=lbl, **attrs)
 
-    # 2. Add Edges, ignoring those starting from an input node
-    num_enabled, num_disabled = 0, 0
+    agg_weights_enabled   = defaultdict(list)   
+    agg_weights_disabled  = defaultdict(list)
 
     for conn in genome.connections.values():
-        in_key, out_key = conn.key
-        weight, enabled = conn.weight, conn.enabled
-
-        # *** SKIP EDGES FROM INPUTS ***
-        if in_key in input_keys_set:
+        src, dst = conn.key
+        if src not in in_set:               
             continue
+        (agg_weights_enabled if conn.enabled else agg_weights_disabled)[dst].append(conn.weight)
 
-        source_node_graph_id = str(in_key)
-        target_node_graph_id = str(out_key)
+    def average_edge_style(weights, enabled=True):
+        if not weights:
+            return None
+        w_avg = sum(weights) / len(weights)
+        style = "solid" if enabled else "dashed"
+        color = ("darkgreen" if w_avg > 0 else
+                 "red"       if w_avg < 0 else "grey")
+        if not enabled:
+            color = "lightgrey"
+        penwidth = str(max(0.3, min(abs(w_avg) * 1.5, 4.0)))
+        label = f"{w_avg:.2f}\\n(n={len(weights)})"
+        return style, color, penwidth, label
 
-        # Ensure BOTH source and target nodes were actually drawn
-        if source_node_graph_id not in drawn_nodes or target_node_graph_id not in drawn_nodes:
-            # print(f"Skipping edge {in_key}->{out_key}: Source or target node not drawn.")
-            continue
+    for dst, w_list in agg_weights_enabled.items():
+        if str(dst) not in drawn_nodes:   continue
+        style, color, penwidth, label = average_edge_style(w_list, enabled=True)
+        dot.edge(AGG_NODE_ID, str(dst), label=label,
+                 style=style, color=color, penwidth=penwidth)
 
-        # Draw edge if enabled or show_disabled is True
-        if enabled or show_disabled:
-            style = 'solid' if enabled else 'dashed'
-            color = 'grey'
-            if enabled:
-                 color = 'darkgreen' if weight > 0 else 'red' if weight < 0 else 'grey'
-                 penwidth_val = max(0.3, min(abs(weight) * 1.5, 4.0))
-                 num_enabled += 1
-            else: # Disabled style
-                 color = 'lightgrey'
-                 penwidth_val = 0.2
-                 num_disabled += 1
-
-            penwidth = str(penwidth_val)
-            label_str = f'{weight:.2f}'
-
-            dot.edge(source_node_graph_id, target_node_graph_id, label=label_str,
+    if show_disabled:
+        for dst, w_list in agg_weights_disabled.items():
+            if str(dst) not in drawn_nodes:   continue
+            style, color, penwidth, label = average_edge_style(w_list, enabled=False)
+            dot.edge(AGG_NODE_ID, str(dst), label=label,
                      style=style, color=color, penwidth=penwidth)
 
+    enabled_ed, disabled_ed = 0, 0
+    for conn in genome.connections.values():
+        src, dst = conn.key
+        if src in in_set:       
+            continue
+        if str(src) not in drawn_nodes or str(dst) not in drawn_nodes:
+            continue
 
-    print(f"Graph Nodes: {len(hidden_node_ids)} Hidden, {len(output_node_ids)} Output (Inputs omitted)")
-    print(f"Graph Edges: {num_enabled} Enabled (+{num_disabled} Disabled) shown (Input connections omitted)")
+        style = "solid" if conn.enabled else "dashed"
+        enabled_flag = conn.enabled
+        color = ("darkgreen" if conn.weight > 0 else
+                 "red"       if conn.weight < 0 else "grey")
+        if not enabled_flag:
+            color = "lightgrey"
+        penwidth = str(max(0.3, min(abs(conn.weight) * 1.5, 4.0)))
+        dot.edge(str(src), str(dst), label=f"{conn.weight:.2f}",
+                 style=style, color=color, penwidth=penwidth)
+        if enabled_flag:
+            enabled_ed += 1
+        else:
+            disabled_ed += 1
 
-    # Render graph
-    try:
-        result_dir = os.path.dirname(filename) or '.'
-        ensure_dir(result_dir)
-        output_path_base = os.path.join(result_dir, output_filename)
-        dot.render(output_path_base, format='png', view=False, cleanup=True)
-        print(f"Graph saved to {output_path_base}.png")
-    except Exception as e:
-         print(f"Error rendering graph: {e}")
-         dot_source_path = output_path_base + ".gv"
-         try: dot.save(dot_source_path); print(f"DOT source saved to {dot_source_path}")
-         except Exception as e_save: print(f"Error saving DOT source: {e_save}")
+    print(f"[viz] hidden={hidden_ct}  output={output_ct} "
+          f"(+ aggregate input node)")
+    print(f"[viz] edges: {enabled_ed} enabled  +{disabled_ed} disabled"
+          f"  (+ aggregated input edges)")
 
-def ensure_dir(directory):
-    if not os.path.exists(directory):
-        try: os.makedirs(directory); print(f"Created directory: {directory}")
-        except OSError as e: print(f"Error creating directory {directory}: {e}")
+    out_dir = os.path.dirname(filename) or "."
+    ensure_dir(out_dir)
+    out_path_base = os.path.join(out_dir, output_basename)
+    dot.render(out_path_base, format="png", view=False, cleanup=True)
+    print(f"[viz] saved → {out_path_base}.png")
+
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("Usage: python visualize_genome.py <path_to_genome.pkl> [output_filename_base]")
+        print("Usage: python visualize_genome.py <genome.pkl> [output_name]")
         sys.exit(1)
 
-    filepath = sys.argv[1]
-    if not os.path.exists(filepath):
-        print(f"Error: File not found at {filepath}")
-        sys.exit(1)
+    fpath   = sys.argv[1]
+    outname = sys.argv[2] if len(sys.argv) > 2 else \
+              os.path.splitext(os.path.basename(fpath))[0] + "_graph"
 
-    if len(sys.argv) > 2:
-        base_output_name = sys.argv[2]
-    else:
-        base_output_name = os.path.splitext(os.path.basename(filepath))[0] + "_graph"
-
-    visualize_genome(filepath, base_output_name, show_disabled=True)
+    visualize_genome(fpath, outname, show_disabled=True)
